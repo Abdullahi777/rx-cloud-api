@@ -280,6 +280,7 @@ app.post('/api/pos/sync-transactions', (req, res) => {
   res.json({ status: 'success' });
 });
 
+// Detailed Summary & Historical Reports Endpoint
 app.get('/api/owner/:pharmacyId/summary', (req, res) => {
   const { pharmacyId } = req.params;
   const { pin } = req.query;
@@ -299,6 +300,23 @@ app.get('/api/owner/:pharmacyId/summary', (req, res) => {
   const mpesaRevenue = todayTxns.filter(t => t.method === 'MPESA').reduce((sum, t) => sum + (Number(t.total) || 0), 0);
   const cashRevenue = todayTxns.filter(t => t.method === 'CASH').reduce((sum, t) => sum + (Number(t.total) || 0), 0);
 
+  // Group all past transactions by day for historical reports
+  const dailyHistory = {};
+  txns.forEach(t => {
+    const d = t.isoDate || (t.date ? String(t.date).split(',')[0].trim() : 'Unknown');
+    if (!dailyHistory[d]) {
+      dailyHistory[d] = { date: d, total: 0, mpesa: 0, cash: 0, count: 0 };
+    }
+    const amt = Number(t.total) || 0;
+    dailyHistory[d].total += amt;
+    dailyHistory[d].count += 1;
+    if (t.method === 'MPESA') dailyHistory[d].mpesa += amt;
+    else dailyHistory[d].cash += amt;
+  });
+
+  const dailyReports = Object.values(dailyHistory).sort((a, b) => b.date.localeCompare(a.date));
+  const allTimeRevenue = txns.reduce((sum, t) => sum + (Number(t.total) || 0), 0);
+
   res.json({
     pharmacyId,
     today: {
@@ -307,7 +325,12 @@ app.get('/api/owner/:pharmacyId/summary', (req, res) => {
       cashRevenue,
       transactionCount: todayTxns.length
     },
-    recentTransactions: txns.slice(0, 30),
+    allTime: {
+      totalRevenue: allTimeRevenue,
+      totalCount: txns.length
+    },
+    dailyReports,
+    recentTransactions: txns.slice(0, 100),
     inventorySummary: {
       totalProducts: inventory.length,
       lowStockCount: inventory.filter(i => Number(i.stock) < 20).length
@@ -335,16 +358,20 @@ app.post('/api/owner/:pharmacyId/change-pin', (req, res) => {
   res.json({ success: true, message: 'PIN updated successfully!' });
 });
 
+// ==========================================
+// SECURE OWNER MOBILE DASHBOARD (WITH REPORTS & HISTORY)
+// ==========================================
+
 app.get('/owner', (req, res) => {
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>PharmaLink - Owner Security Access</title>
+  <title>PharmaLink - Owner Live & Reports</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-slate-900 text-slate-800 font-sans min-h-screen flex flex-col justify-center p-4">
+<body class="bg-slate-900 text-slate-800 font-sans min-h-screen flex flex-col justify-center p-3 selection:bg-emerald-500 selection:text-white">
 
   <!-- PIN LOCKPAD SCREEN -->
   <div id="pinScreen" class="max-w-xs mx-auto w-full text-center space-y-6">
@@ -355,8 +382,7 @@ app.get('/owner', (req, res) => {
         </svg>
       </div>
       <h2 class="text-xl font-black text-white">Owner Security Lock</h2>
-      <p class="text-xs text-slate-400">Enter your 4-digit PIN to view live sales</p>
-      <p class="text-[11px] text-emerald-400/80 font-mono">Default PIN: 1234</p>
+      <p class="text-xs text-slate-400">Enter your 4-digit PIN to access live monitor & reports</p>
     </div>
 
     <!-- 4-Dot Display -->
@@ -388,55 +414,97 @@ app.get('/owner', (req, res) => {
 
   <!-- MAIN DASHBOARD (HIDDEN UNTIL UNLOCKED) -->
   <div id="dashboardScreen" class="max-w-md mx-auto w-full space-y-4 hidden pb-12">
+    <!-- Header -->
     <div class="bg-emerald-900 text-white p-5 rounded-3xl shadow-xl flex justify-between items-center border border-emerald-800">
       <div>
         <h1 class="text-lg font-black tracking-wide text-emerald-400">PharmaLink Live</h1>
-        <p class="text-xs text-emerald-200">Owner Mobile Monitor</p>
+        <p class="text-xs text-emerald-200">Owner Monitor & Reports</p>
       </div>
-      <div class="flex gap-2">
-        <button onclick="openChangePinModal()" class="bg-emerald-950 hover:bg-emerald-800 text-emerald-200 text-xs font-bold px-3 py-1.5 rounded-xl border border-emerald-700 transition">
-          Change PIN
+      <div class="flex gap-1.5">
+        <button onclick="openChangePinModal()" class="bg-emerald-950 hover:bg-emerald-800 text-emerald-200 text-xs font-bold px-2.5 py-1.5 rounded-xl border border-emerald-700 transition">
+          PIN
         </button>
-        <button onclick="lockScreen()" class="bg-emerald-950 hover:bg-red-900/60 text-emerald-200 hover:text-red-200 text-xs font-bold px-3 py-1.5 rounded-xl border border-emerald-700 transition">
+        <button onclick="lockScreen()" class="bg-emerald-950 hover:bg-red-900/60 text-emerald-200 hover:text-red-200 text-xs font-bold px-2.5 py-1.5 rounded-xl border border-emerald-700 transition">
           Lock
         </button>
       </div>
     </div>
 
-    <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
-      <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Today's Total Sales</span>
-      <div class="text-3xl font-black text-slate-900" id="totalSales">KES 0</div>
-      
-      <div class="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100">
-        <div class="bg-green-50 p-3 rounded-2xl border border-green-100">
-          <span class="text-[10px] font-bold text-green-700 uppercase">M-Pesa</span>
-          <p class="text-lg font-bold text-green-800" id="mpesaSales">KES 0</p>
+    <!-- TAB SWITCHER: TODAY vs REPORTS -->
+    <div class="grid grid-cols-2 gap-2 bg-slate-200 p-1.5 rounded-2xl">
+      <button id="tabTodayBtn" onclick="switchView('today')" class="py-2 text-xs font-bold rounded-xl bg-white text-slate-900 shadow-sm transition">
+        Live Today
+      </button>
+      <button id="tabReportsBtn" onclick="switchView('reports')" class="py-2 text-xs font-bold rounded-xl text-slate-600 hover:text-slate-900 transition">
+        Reports & History
+      </button>
+    </div>
+
+    <!-- VIEW 1: TODAY'S LIVE MONITOR -->
+    <div id="todayView" class="space-y-4">
+      <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
+        <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Today's Sales</span>
+        <div class="text-3xl font-black text-slate-900" id="totalSales">KES 0</div>
+        
+        <div class="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100">
+          <div class="bg-green-50 p-3 rounded-2xl border border-green-100">
+            <span class="text-[10px] font-bold text-green-700 uppercase">M-Pesa</span>
+            <p class="text-lg font-bold text-green-800" id="mpesaSales">KES 0</p>
+          </div>
+          <div class="bg-blue-50 p-3 rounded-2xl border border-blue-100">
+            <span class="text-[10px] font-bold text-blue-700 uppercase">Cash</span>
+            <p class="text-lg font-bold text-blue-800" id="cashSales">KES 0</p>
+          </div>
         </div>
-        <div class="bg-blue-50 p-3 rounded-2xl border border-blue-100">
-          <span class="text-[10px] font-bold text-blue-700 uppercase">Cash</span>
-          <p class="text-lg font-bold text-blue-800" id="cashSales">KES 0</p>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+          <span class="text-[10px] font-bold text-slate-400 uppercase">Catalog Items</span>
+          <p class="text-xl font-black text-slate-800" id="catalogCount">0 items</p>
         </div>
+        <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+          <span class="text-[10px] font-bold text-orange-600 uppercase">Low Stock</span>
+          <p class="text-xl font-black text-orange-600" id="lowStockCount">0 items</p>
+        </div>
+      </div>
+
+      <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
+        <div class="flex justify-between items-center border-b pb-2">
+          <h3 class="font-bold text-sm text-slate-800">Today's Receipts</h3>
+          <span class="text-xs text-slate-400" id="txCount">0 sales</span>
+        </div>
+        <div id="txList" class="space-y-2 max-h-80 overflow-y-auto divide-y divide-slate-100 text-xs"></div>
       </div>
     </div>
 
-    <div class="grid grid-cols-2 gap-3">
-      <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-        <span class="text-[10px] font-bold text-slate-400 uppercase">Catalog Items</span>
-        <p class="text-xl font-black text-slate-800" id="catalogCount">0 items</p>
+    <!-- VIEW 2: HISTORICAL REPORTS & DAILY LOGS -->
+    <div id="reportsView" class="space-y-4 hidden">
+      <!-- All-Time Revenue Card -->
+      <div class="bg-gradient-to-r from-slate-900 to-slate-800 text-white p-5 rounded-3xl shadow-md border border-slate-700 space-y-2">
+        <span class="text-[10px] font-bold uppercase text-emerald-400 tracking-wider">All-Time Recorded Sales</span>
+        <div class="text-3xl font-black text-white" id="allTimeRevenue">KES 0</div>
+        <p class="text-xs text-slate-400" id="allTimeCount">0 total transactions</p>
       </div>
-      <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-        <span class="text-[10px] font-bold text-orange-600 uppercase">Low Stock</span>
-        <p class="text-xl font-black text-orange-600" id="lowStockCount">0 items</p>
+
+      <!-- Daily Sales Summary Breakdown -->
+      <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
+        <h3 class="font-bold text-sm text-slate-800 border-b pb-2">Daily Revenue History</h3>
+        <div id="dailyList" class="space-y-2.5 max-h-60 overflow-y-auto text-xs divide-y divide-slate-100">
+          <p class="text-slate-400 text-center py-3">Loading daily reports...</p>
+        </div>
+      </div>
+
+      <!-- Full Historical Transactions Feed -->
+      <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
+        <div class="flex justify-between items-center border-b pb-2">
+          <h3 class="font-bold text-sm text-slate-800">All Past Receipts</h3>
+          <span class="text-xs text-slate-400">Click receipt for items</span>
+        </div>
+        <div id="allTxList" class="space-y-2 max-h-96 overflow-y-auto divide-y divide-slate-100 text-xs"></div>
       </div>
     </div>
 
-    <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
-      <div class="flex justify-between items-center border-b pb-2">
-        <h3 class="font-bold text-sm text-slate-800">Recent Receipts</h3>
-        <span class="text-xs text-slate-400" id="txCount">0 sales</span>
-      </div>
-      <div id="txList" class="space-y-2 max-h-80 overflow-y-auto divide-y divide-slate-100 text-xs"></div>
-    </div>
   </div>
 
   <!-- CHANGE PIN MODAL -->
@@ -469,9 +537,37 @@ app.get('/owner', (req, res) => {
     </div>
   </div>
 
+  <!-- RECEIPT ITEMS DETAIL MODAL -->
+  <div id="receiptModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
+    <div class="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl text-xs">
+      <div class="flex justify-between items-start border-b pb-3">
+        <div>
+          <h4 class="font-bold text-sm text-slate-800" id="receiptModalRef">Receipt</h4>
+          <p class="text-[10px] text-slate-400" id="receiptModalDate"></p>
+        </div>
+        <button onclick="closeReceiptModal()" class="text-slate-400 hover:text-slate-600 font-bold text-base">&times;</button>
+      </div>
+
+      <div>
+        <h5 class="font-bold text-slate-600 uppercase text-[10px] mb-2">Sold Medications</h5>
+        <div id="receiptModalItems" class="space-y-1.5 divide-y divide-slate-100 max-h-48 overflow-y-auto"></div>
+      </div>
+
+      <div class="border-t pt-3 flex justify-between items-center text-sm font-bold">
+        <span>Total Paid:</span>
+        <span class="text-emerald-700" id="receiptModalTotal">KES 0</span>
+      </div>
+
+      <button onclick="closeReceiptModal()" class="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold">
+        Close
+      </button>
+    </div>
+  </div>
+
   <script>
     var currentPin = '';
     var pollTimer = null;
+    var cachedData = null;
 
     function updateDots() {
       for (var i = 0; i < 4; i++) {
@@ -525,7 +621,7 @@ app.get('/owner', (req, res) => {
     function showDashboard() {
       document.getElementById('pinScreen').classList.add('hidden');
       document.getElementById('dashboardScreen').classList.remove('hidden');
-      document.body.className = "bg-slate-100 text-slate-800 font-sans min-h-screen p-4";
+      document.body.className = "bg-slate-100 text-slate-800 font-sans min-h-screen p-3";
       fetchOwnerData();
       if (pollTimer) clearInterval(pollTimer);
       pollTimer = setInterval(fetchOwnerData, 4000);
@@ -536,8 +632,28 @@ app.get('/owner', (req, res) => {
       if (pollTimer) clearInterval(pollTimer);
       document.getElementById('dashboardScreen').classList.add('hidden');
       document.getElementById('pinScreen').classList.remove('hidden');
-      document.body.className = "bg-slate-900 text-slate-800 font-sans min-h-screen flex flex-col justify-center p-4";
+      document.body.className = "bg-slate-900 text-slate-800 font-sans min-h-screen flex flex-col justify-center p-3";
       clearPin();
+    }
+
+    function switchView(tab) {
+      var todayView = document.getElementById('todayView');
+      var reportsView = document.getElementById('reportsView');
+      var tabTodayBtn = document.getElementById('tabTodayBtn');
+      var tabReportsBtn = document.getElementById('tabReportsBtn');
+
+      if (tab === 'today') {
+        todayView.classList.remove('hidden');
+        reportsView.classList.add('hidden');
+        tabTodayBtn.className = "py-2 text-xs font-bold rounded-xl bg-white text-slate-900 shadow-sm transition";
+        tabReportsBtn.className = "py-2 text-xs font-bold rounded-xl text-slate-600 hover:text-slate-900 transition";
+      } else {
+        todayView.classList.add('hidden');
+        reportsView.classList.remove('hidden');
+        tabReportsBtn.className = "py-2 text-xs font-bold rounded-xl bg-white text-slate-900 shadow-sm transition";
+        tabTodayBtn.className = "py-2 text-xs font-bold rounded-xl text-slate-600 hover:text-slate-900 transition";
+        renderReports();
+      }
     }
 
     function fetchOwnerData() {
@@ -551,6 +667,8 @@ app.get('/owner', (req, res) => {
         })
         .then(function(data) {
           if (!data || !data.today) return;
+          cachedData = data;
+
           document.getElementById('totalSales').innerText = 'KES ' + Number(data.today.totalRevenue || 0).toLocaleString();
           document.getElementById('mpesaSales').innerText = 'KES ' + Number(data.today.mpesaRevenue || 0).toLocaleString();
           document.getElementById('cashSales').innerText = 'KES ' + Number(data.today.cashRevenue || 0).toLocaleString();
@@ -558,10 +676,13 @@ app.get('/owner', (req, res) => {
           document.getElementById('catalogCount').innerText = (data.inventorySummary.totalProducts || 0) + ' items';
           document.getElementById('lowStockCount').innerText = (data.inventorySummary.lowStockCount || 0) + ' items';
 
+          var todayStr = new Date().toISOString().split('T')[0];
+          var todayTxns = (data.recentTransactions || []).filter(function(t) { return t.isoDate === todayStr; });
+
           var list = document.getElementById('txList');
-          if (data.recentTransactions && data.recentTransactions.length > 0) {
-            list.innerHTML = data.recentTransactions.map(function(t) {
-              return '<div class="pt-2 flex justify-between items-center">' +
+          if (todayTxns.length > 0) {
+            list.innerHTML = todayTxns.map(function(t, idx) {
+              return '<div onclick="showReceiptDetails(' + idx + ')" class="pt-2 flex justify-between items-center cursor-pointer hover:bg-slate-50 p-1 rounded-lg transition">' +
                 '<div>' +
                   '<p class="font-bold text-slate-800">' + (t.refId || 'RECEIPT') + ' <span class="font-normal text-[10px] text-slate-400">(' + (t.method || 'CASH') + ')</span></p>' +
                   '<p class="text-[10px] text-slate-400">' + (t.date || '') + '</p>' +
@@ -570,23 +691,93 @@ app.get('/owner', (req, res) => {
               '</div>';
             }).join('');
           } else {
-            list.innerHTML = '<p class="text-center text-slate-400 py-4">No transactions recorded today.</p>';
+            list.innerHTML = '<p class="text-center text-slate-400 py-4">Waiting for live sales today...</p>';
           }
+
+          renderReports();
         })
         .catch(function(e) {});
     }
 
+    function renderReports() {
+      if (!cachedData) return;
+
+      document.getElementById('allTimeRevenue').innerText = 'KES ' + Number(cachedData.allTime.totalRevenue || 0).toLocaleString();
+      document.getElementById('allTimeCount').innerText = cachedData.allTime.totalCount + ' total sales recorded';
+
+      var dailyList = document.getElementById('dailyList');
+      if (cachedData.dailyReports && cachedData.dailyReports.length > 0) {
+        dailyList.innerHTML = cachedData.dailyReports.map(function(d) {
+          return '<div class="pt-2 flex justify-between items-center">' +
+            '<div>' +
+              '<p class="font-bold text-slate-800">' + d.date + ' <span class="text-[10px] text-slate-400 font-normal">(' + d.count + ' sales)</span></p>' +
+              '<p class="text-[10px] text-slate-500">M-Pesa: KES ' + Number(d.mpesa).toLocaleString() + ' &bull; Cash: KES ' + Number(d.cash).toLocaleString() + '</p>' +
+            '</div>' +
+            '<span class="font-bold text-slate-900 font-mono">KES ' + Number(d.total).toLocaleString() + '</span>' +
+          '</div>';
+        }).join('');
+      } else {
+        dailyList.innerHTML = '<p class="text-slate-400 text-center py-2">No historical sales yet.</p>';
+      }
+
+      var allTxList = document.getElementById('allTxList');
+      if (cachedData.recentTransactions && cachedData.recentTransactions.length > 0) {
+        allTxList.innerHTML = cachedData.recentTransactions.map(function(t, idx) {
+          return '<div onclick="showReceiptDetails(' + idx + ')" class="pt-2 flex justify-between items-center cursor-pointer hover:bg-slate-50 p-1.5 rounded-xl transition border border-slate-100">' +
+            '<div>' +
+              '<p class="font-bold text-slate-800">' + (t.refId || 'RECEIPT') + ' <span class="font-normal text-[10px] text-slate-400">(' + (t.method || 'CASH') + ')</span></p>' +
+              '<p class="text-[10px] text-slate-400">' + (t.date || '') + ' &bull; ' + (t.items ? t.items.length : 0) + ' items</p>' +
+            '</div>' +
+            '<span class="font-bold text-sm text-emerald-700">KES ' + Number(t.total || 0).toLocaleString() + '</span>' +
+          '</div>';
+        }).join('');
+      }
+    }
+
+    function showReceiptDetails(index) {
+      if (!cachedData || !cachedData.recentTransactions || !cachedData.recentTransactions[index]) return;
+      var t = cachedData.recentTransactions[index];
+
+      document.getElementById('receiptModalRef').innerText = (t.refId || 'RECEIPT') + ' (' + (t.method || 'CASH') + ')';
+      document.getElementById('receiptModalDate').innerText = t.date || '';
+      document.getElementById('receiptModalTotal').innerText = 'KES ' + Number(t.total || 0).toLocaleString();
+
+      var itemsContainer = document.getElementById('receiptModalItems');
+      if (t.items && t.items.length > 0) {
+        itemsContainer.innerHTML = t.items.map(function(it) {
+          return '<div class="pt-1.5 flex justify-between text-xs">' +
+            '<span>' + it.name + ' <span class="text-slate-400">x' + (it.qty || it.quantity || 1) + '</span></span>' +
+            '<span class="font-bold">KES ' + Number(it.price * (it.qty || it.quantity || 1)).toLocaleString() + '</span>' +
+          '</div>';
+        }).join('');
+      } else {
+        itemsContainer.innerHTML = '<p class="text-slate-400 py-2">No individual item details.</p>';
+      }
+
+      var m = document.getElementById('receiptModal');
+      m.classList.remove('hidden');
+      m.classList.add('flex');
+    }
+
+    function closeReceiptModal() {
+      var m = document.getElementById('receiptModal');
+      m.classList.add('hidden');
+      m.classList.remove('flex');
+    }
+
     function openChangePinModal() {
-      document.getElementById('changePinModal').classList.remove('hidden');
-      document.getElementById('changePinModal').classList.add('flex');
+      var m = document.getElementById('changePinModal');
+      m.classList.remove('hidden');
+      m.classList.add('flex');
       document.getElementById('oldPinInput').value = '';
       document.getElementById('newPinInput').value = '';
       document.getElementById('pinModalMsg').classList.add('hidden');
     }
 
     function closeChangePinModal() {
-      document.getElementById('changePinModal').classList.add('hidden');
-      document.getElementById('changePinModal').classList.remove('flex');
+      var m = document.getElementById('changePinModal');
+      m.classList.add('hidden');
+      m.classList.remove('flex');
     }
 
     function submitChangePin() {
@@ -600,7 +791,7 @@ app.get('/owner', (req, res) => {
         return;
       }
 
-      fetch('/api/owner/garissa-branch/change-pin', {
+      fetch('/api/owner/:pharmacyId/change-pin'.replace(':pharmacyId', 'garissa-branch'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ currentPin: oldPin, newPin: newPin })
