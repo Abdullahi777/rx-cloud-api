@@ -18,7 +18,6 @@ const TRANSACTIONS_FILE = path.join(__dirname, 'transactions_db.json');
 const MPESA_CONFIG_FILE = path.join(__dirname, 'mpesa.config.json');
 const MPESA_LOGS_FILE = path.join(__dirname, 'mpesa_transactions.json');
 
-// Helper to load data on boot
 const loadData = (file, defaultValue) => {
   try {
     if (fs.existsSync(file)) {
@@ -30,13 +29,11 @@ const loadData = (file, defaultValue) => {
   return defaultValue;
 };
 
-// Data collections
 let prescriptions = loadData(DB_FILE, []);
 let inventoryStore = loadData(INVENTORY_FILE, {});
 let transactionsStore = loadData(TRANSACTIONS_FILE, {});
 let mpesaTransactions = loadData(MPESA_LOGS_FILE, []);
 
-// M-Pesa & Security Configuration
 let MPESA_KEYS = loadData(MPESA_CONFIG_FILE, {
   isSandbox: true,
   consumerKey: "ENTER_YOUR_SANDBOX_CONSUMER_KEY_HERE",
@@ -44,7 +41,7 @@ let MPESA_KEYS = loadData(MPESA_CONFIG_FILE, {
   businessShortCode: "174379",
   passkey: "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919",
   callbackUrl: "https://rx-cloud-api-c2kx.onrender.com/api/mpesa/callback",
-  ownerPin: "1234" // Default Owner PIN
+  ownerPin: "1234"
 });
 
 const savePrescriptions = () => fs.writeFileSync(DB_FILE, JSON.stringify(prescriptions, null, 2));
@@ -55,12 +52,7 @@ const saveMpesaConfig = () => fs.writeFileSync(MPESA_CONFIG_FILE, JSON.stringify
 
 const getDarajaBaseUrl = () => MPESA_KEYS.isSandbox ? "https://sandbox.safaricom.co.ke" : "https://api.safaricom.co.ke";
 
-// 1. Health Check
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
-
-// ==========================================
-// M-PESA DARAJA ENGINE (CLOUD HOSTED)
-// ==========================================
 
 const getAccessToken = async (req, res, next) => {
   const baseUrl = getDarajaBaseUrl();
@@ -212,10 +204,6 @@ app.get("/api/mpesa/verify", (req, res) => {
   }
 });
 
-// ==========================================
-// POS INVENTORY & PRESCRIPTION ROUTES
-// ==========================================
-
 app.post('/api/pos/sync-inventory', (req, res) => {
   const { pharmacyId, items } = req.body;
   if (!pharmacyId || !Array.isArray(items)) return res.status(400).json({ error: 'Invalid payload' });
@@ -293,15 +281,10 @@ app.post('/api/pos/sync-transactions', (req, res) => {
   res.json({ status: 'success' });
 });
 
-// ==========================================
-// SECURE OWNER MOBILE SUMMARY API (PIN PROTECTED)
-// ==========================================
-
 app.get('/api/owner/:pharmacyId/summary', (req, res) => {
   const { pharmacyId } = req.params;
   const { pin } = req.query;
 
-  // Verify PIN (default: '1234')
   const validPin = String(MPESA_KEYS.ownerPin || '1234').trim();
   if (String(pin || '').trim() !== validPin) {
     return res.status(401).json({ error: 'Invalid Owner Security PIN' });
@@ -333,225 +316,223 @@ app.get('/api/owner/:pharmacyId/summary', (req, res) => {
   });
 });
 
-// ==========================================
-// SECURE OWNER MOBILE DASHBOARD (PIN KEYPAD)
-// ==========================================
-
 app.get('/owner', (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-      <title>PharmaLink - Owner Security Access</title>
-      <script src="https://cdn.tailwindcss.com"></script>
-    </head>
-    <body class="bg-slate-900 text-slate-800 font-sans min-h-screen flex flex-col justify-center p-4 selection:bg-emerald-500 selection:text-white">
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>PharmaLink - Owner Security Access</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-900 text-slate-800 font-sans min-h-screen flex flex-col justify-center p-4">
+
+  <!-- PIN LOCKPAD SCREEN -->
+  <div id="pinScreen" class="max-w-xs mx-auto w-full text-center space-y-6">
+    <div class="space-y-2">
+      <div class="w-16 h-16 bg-emerald-600/20 border border-emerald-500/30 rounded-3xl flex items-center justify-center mx-auto text-emerald-400">
+        <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+        </svg>
+      </div>
+      <h2 class="text-xl font-black text-white">Owner Security Lock</h2>
+      <p class="text-xs text-slate-400">Enter your 4-digit PIN to view live sales</p>
+    </div>
+
+    <!-- 4-Dot Display -->
+    <div class="flex justify-center gap-4 py-2">
+      <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot0"></span>
+      <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot1"></span>
+      <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot2"></span>
+      <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot3"></span>
+    </div>
+
+    <p id="errorMsg" class="text-xs font-bold text-red-400 hidden">Incorrect PIN. Try again.</p>
+
+    <!-- Keypad -->
+    <div class="grid grid-cols-3 gap-3 pt-2">
+      <button onclick="pressKey('1')" class="h-14 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700">1</button>
+      <button onclick="pressKey('2')" class="h-14 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700">2</button>
+      <button onclick="pressKey('3')" class="h-14 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700">3</button>
+      <button onclick="pressKey('4')" class="h-14 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700">4</button>
+      <button onclick="pressKey('5')" class="h-14 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700">5</button>
+      <button onclick="pressKey('6')" class="h-14 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700">6</button>
+      <button onclick="pressKey('7')" class="h-14 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700">7</button>
+      <button onclick="pressKey('8')" class="h-14 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700">8</button>
+      <button onclick="pressKey('9')" class="h-14 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700">9</button>
+      <button onclick="clearPin()" class="h-14 bg-slate-800/40 text-slate-400 font-bold text-xs rounded-2xl active:scale-95 transition">CLEAR</button>
+      <button onclick="pressKey('0')" class="h-14 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700">0</button>
+      <button onclick="backspace()" class="h-14 bg-slate-800/40 text-slate-400 font-bold text-base rounded-2xl active:scale-95 transition flex items-center justify-center">&#9003;</button>
+    </div>
+  </div>
+
+  <!-- MAIN DASHBOARD (HIDDEN UNTIL UNLOCKED) -->
+  <div id="dashboardScreen" class="max-w-md mx-auto w-full space-y-4 hidden pb-12">
+    <div class="bg-emerald-900 text-white p-5 rounded-3xl shadow-xl flex justify-between items-center border border-emerald-800">
+      <div>
+        <h1 class="text-lg font-black tracking-wide text-emerald-400">PharmaLink Live</h1>
+        <p class="text-xs text-emerald-200">Owner Mobile Monitor</p>
+      </div>
+      <button onclick="lockScreen()" class="bg-emerald-950 hover:bg-red-900/60 text-emerald-200 hover:text-red-200 text-xs font-bold px-3 py-1.5 rounded-xl border border-emerald-700 transition">
+        Lock
+      </button>
+    </div>
+
+    <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
+      <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Today's Total Sales</span>
+      <div class="text-3xl font-black text-slate-900" id="totalSales">KES 0</div>
       
-      <!-- 1. PIN LOCKPAD SCREEN -->
-      <div id="pinScreen" class="max-w-xs mx-auto w-full text-center space-y-6">
-        <div class="space-y-2">
-          <div class="w-16 h-16 bg-emerald-600/20 border border-emerald-500/30 rounded-3xl flex items-center justify-center mx-auto text-emerald-400">
-            <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
-          </div>
-          <h2 class="text-xl font-black text-white">Owner Security Lock</h2>
-          <p class="text-xs text-slate-400">Enter your 4-digit PIN to view live sales</p>
+      <div class="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100">
+        <div class="bg-green-50 p-3 rounded-2xl border border-green-100">
+          <span class="text-[10px] font-bold text-green-700 uppercase">M-Pesa</span>
+          <p class="text-lg font-bold text-green-800" id="mpesaSales">KES 0</p>
         </div>
-
-        <!-- 4-Dot Display -->
-        <div class="flex justify-center gap-4 py-2" id="dotsContainer">
-          <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot0"></span>
-          <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot1"></span>
-          <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot2"></span>
-          <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot3"></span>
-        </div>
-
-        <p id="errorMsg" class="text-xs font-bold text-red-400 hidden">Incorrect PIN. Try again.</p>
-
-        <!-- Numeric Keypad -->
-        <div class="grid grid-cols-3 gap-3 pt-2">
-          ${.map(n => `
-            <button onclick="pressKey('${n}')" class="h-14 bg-slate-800/80 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700/50">
-              ${n}
-            </button>
-          `).join('')}
-          <button onclick="clearPin()" class="h-14 bg-slate-800/40 text-slate-400 font-bold text-xs rounded-2xl active:scale-95 transition">
-            CLEAR
-          </button>
-          <button onclick="pressKey('0')" class="h-14 bg-slate-800/80 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700/50">
-            0
-          </button>
-          <button onclick="backspace()" class="h-14 bg-slate-800/40 text-slate-400 font-bold text-xs rounded-2xl active:scale-95 transition flex items-center justify-center">
-            ⌫
-          </button>
+        <div class="bg-blue-50 p-3 rounded-2xl border border-blue-100">
+          <span class="text-[10px] font-bold text-blue-700 uppercase">Cash</span>
+          <p class="text-lg font-bold text-blue-800" id="cashSales">KES 0</p>
         </div>
       </div>
+    </div>
 
-      <!-- 2. MAIN DASHBOARD SCREEN (HIDDEN UNTIL UNLOCKED) -->
-      <div id="dashboardScreen" class="max-w-md mx-auto w-full space-y-4 hidden pb-12">
-        <!-- Header -->
-        <div class="bg-emerald-900 text-white p-5 rounded-3xl shadow-xl flex justify-between items-center border border-emerald-800">
-          <div>
-            <h1 class="text-lg font-black tracking-wide text-emerald-400">PharmaLink Live</h1>
-            <p class="text-xs text-emerald-200">Owner Mobile Monitor</p>
-          </div>
-          <button onclick="lockScreen()" class="bg-emerald-950 hover:bg-red-900/60 text-emerald-200 hover:text-red-200 text-xs font-bold px-3 py-1.5 rounded-xl border border-emerald-700 transition">
-            Lock
-          </button>
-        </div>
-
-        <!-- Sales Card -->
-        <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
-          <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Today's Total Sales</span>
-          <div class="text-3xl font-black text-slate-900" id="totalSales">KES 0</div>
-          
-          <div class="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100">
-            <div class="bg-green-50 p-3 rounded-2xl border border-green-100">
-              <span class="text-[10px] font-bold text-green-700 uppercase">M-Pesa</span>
-              <p class="text-lg font-bold text-green-800" id="mpesaSales">KES 0</p>
-            </div>
-            <div class="bg-blue-50 p-3 rounded-2xl border border-blue-100">
-              <span class="text-[10px] font-bold text-blue-700 uppercase">Cash</span>
-              <p class="text-lg font-bold text-blue-800" id="cashSales">KES 0</p>
-            </div>
-          </div>
-        </div>
-
-        <!-- Inventory Stats -->
-        <div class="grid grid-cols-2 gap-3">
-          <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-            <span class="text-[10px] font-bold text-slate-400 uppercase">Catalog Items</span>
-            <p class="text-xl font-black text-slate-800" id="catalogCount">0 items</p>
-          </div>
-          <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-            <span class="text-[10px] font-bold text-orange-600 uppercase">Low Stock</span>
-            <p class="text-xl font-black text-orange-600" id="lowStockCount">0 items</p>
-          </div>
-        </div>
-
-        <!-- Receipts Feed -->
-        <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
-          <div class="flex justify-between items-center border-b pb-2">
-            <h3 class="font-bold text-sm text-slate-800">Recent Receipts</h3>
-            <span class="text-xs text-slate-400" id="txCount">0 sales</span>
-          </div>
-          <div id="txList" class="space-y-2 max-h-80 overflow-y-auto divide-y divide-slate-100 text-xs"></div>
-        </div>
+    <div class="grid grid-cols-2 gap-3">
+      <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+        <span class="text-[10px] font-bold text-slate-400 uppercase">Catalog Items</span>
+        <p class="text-xl font-black text-slate-800" id="catalogCount">0 items</p>
       </div>
+      <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
+        <span class="text-[10px] font-bold text-orange-600 uppercase">Low Stock</span>
+        <p class="text-xl font-black text-orange-600" id="lowStockCount">0 items</p>
+      </div>
+    </div>
 
-      <script>
-        let currentPin = '';
-        let pollTimer = null;
+    <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
+      <div class="flex justify-between items-center border-b pb-2">
+        <h3 class="font-bold text-sm text-slate-800">Recent Receipts</h3>
+        <span class="text-xs text-slate-400" id="txCount">0 sales</span>
+      </div>
+      <div id="txList" class="space-y-2 max-h-80 overflow-y-auto divide-y divide-slate-100 text-xs"></div>
+    </div>
+  </div>
 
-        function updateDots() {
-          for (let i = 0; i < 4; i++) {
-            const dot = document.getElementById('dot' + i);
-            if (i < currentPin.length) {
-              dot.className = "w-4 h-4 rounded-full bg-emerald-400 border-2 border-emerald-400 scale-110 transition-all";
-            } else {
-              dot.className = "w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all";
-            }
-          }
+  <script>
+    var currentPin = '';
+    var pollTimer = null;
+
+    function updateDots() {
+      for (var i = 0; i < 4; i++) {
+        var dot = document.getElementById('dot' + i);
+        if (i < currentPin.length) {
+          dot.className = "w-4 h-4 rounded-full bg-emerald-400 border-2 border-emerald-400 scale-110 transition-all";
+        } else {
+          dot.className = "w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all";
         }
+      }
+    }
 
-        function pressKey(num) {
-          if (currentPin.length >= 4) return;
-          currentPin += num;
-          updateDots();
-          if (currentPin.length === 4) {
-            submitPin();
-          }
-        }
+    function pressKey(num) {
+      if (currentPin.length >= 4) return;
+      currentPin += num;
+      updateDots();
+      if (currentPin.length === 4) {
+        submitPin();
+      }
+    }
 
-        function clearPin() {
-          currentPin = '';
-          updateDots();
-          document.getElementById('errorMsg').classList.add('hidden');
-        }
+    function clearPin() {
+      currentPin = '';
+      updateDots();
+      document.getElementById('errorMsg').classList.add('hidden');
+    }
 
-        function backspace() {
-          currentPin = currentPin.slice(0, -1);
-          updateDots();
-        }
+    function backspace() {
+      currentPin = currentPin.slice(0, -1);
+      updateDots();
+    }
 
-        async function submitPin() {
-          const pin = currentPin;
-          try {
-            const res = await fetch('/api/owner/garissa-branch/summary?pin=' + pin);
-            if (res.status === 200) {
-              localStorage.setItem('pharmalink_owner_pin', pin);
-              showDashboard();
-            } else {
-              document.getElementById('errorMsg').classList.remove('hidden');
-              clearPin();
-            }
-          } catch(e) {
-            alert("Could not reach server.");
+    function submitPin() {
+      var pin = currentPin;
+      fetch('/api/owner/garissa-branch/summary?pin=' + encodeURIComponent(pin))
+        .then(function(res) {
+          if (res.status === 200) {
+            sessionStorage.setItem('pharmalink_owner_pin', pin);
+            showDashboard();
+          } else {
+            document.getElementById('errorMsg').classList.remove('hidden');
             clearPin();
           }
-        }
-
-        function showDashboard() {
-          document.getElementById('pinScreen').classList.add('hidden');
-          document.getElementById('dashboardScreen').classList.remove('hidden');
-          document.body.className = "bg-slate-100 text-slate-800 font-sans min-h-screen p-4";
-          fetchOwnerData();
-          pollTimer = setInterval(fetchOwnerData, 4000);
-        }
-
-        function lockScreen() {
-          localStorage.removeItem('pharmalink_owner_pin');
-          clearInterval(pollTimer);
-          document.getElementById('dashboardScreen').classList.add('hidden');
-          document.getElementById('pinScreen').classList.remove('hidden');
-          document.body.className = "bg-slate-900 text-slate-800 font-sans min-h-screen flex flex-col justify-center p-4";
+        })
+        .catch(function(err) {
+          alert('Could not reach server.');
           clearPin();
-        }
+        });
+    }
 
-        async function fetchOwnerData() {
-          const pin = localStorage.getItem('pharmalink_owner_pin');
-          if (!pin) return lockScreen();
+    function showDashboard() {
+      document.getElementById('pinScreen').classList.add('hidden');
+      document.getElementById('dashboardScreen').classList.remove('hidden');
+      document.body.className = "bg-slate-100 text-slate-800 font-sans min-h-screen p-4";
+      fetchOwnerData();
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(fetchOwnerData, 4000);
+    }
 
-          try {
-            const res = await fetch('/api/owner/garissa-branch/summary?pin=' + pin);
-            if (res.status === 401) return lockScreen();
+    function lockScreen() {
+      sessionStorage.removeItem('pharmalink_owner_pin');
+      if (pollTimer) clearInterval(pollTimer);
+      document.getElementById('dashboardScreen').classList.add('hidden');
+      document.getElementById('pinScreen').classList.remove('hidden');
+      document.body.className = "bg-slate-900 text-slate-800 font-sans min-h-screen flex flex-col justify-center p-4";
+      clearPin();
+    }
 
-            const data = await res.json();
-            document.getElementById('totalSales').innerText = 'KES ' + Number(data.today.totalRevenue || 0).toLocaleString();
-            document.getElementById('mpesaSales').innerText = 'KES ' + Number(data.today.mpesaRevenue || 0).toLocaleString();
-            document.getElementById('cashSales').innerText = 'KES ' + Number(data.today.cashRevenue || 0).toLocaleString();
-            document.getElementById('txCount').innerText = data.today.transactionCount + ' sales today';
-            document.getElementById('catalogCount').innerText = (data.inventorySummary.totalProducts || 0) + ' items';
-            document.getElementById('lowStockCount').innerText = (data.inventorySummary.lowStockCount || 0) + ' items';
+    function fetchOwnerData() {
+      var pin = sessionStorage.getItem('pharmalink_owner_pin');
+      if (!pin) return lockScreen();
 
-            const list = document.getElementById('txList');
-            if (data.recentTransactions && data.recentTransactions.length > 0) {
-              list.innerHTML = data.recentTransactions.map(t => \`
-                <div class="pt-2 flex justify-between items-center">
-                  <div>
-                    <p class="font-bold text-slate-800">\${t.refId || 'RECEIPT'} <span class="font-normal text-[10px] text-slate-400">(\${t.method})</span></p>
-                    <p class="text-[10px] text-slate-400">\${t.date}</p>
-                  </div>
-                  <span class="font-bold text-sm text-emerald-700">KES \${Number(t.total || 0).toLocaleString()}</span>
-                </div>
-              \`).join('');
-            }
-          } catch(e) {}
-        }
+      fetch('/api/owner/garissa-branch/summary?pin=' + encodeURIComponent(pin))
+        .then(function(res) {
+          if (res.status === 401) return lockScreen();
+          return res.json();
+        })
+        .then(function(data) {
+          if (!data || !data.today) return;
+          document.getElementById('totalSales').innerText = 'KES ' + Number(data.today.totalRevenue || 0).toLocaleString();
+          document.getElementById('mpesaSales').innerText = 'KES ' + Number(data.today.mpesaRevenue || 0).toLocaleString();
+          document.getElementById('cashSales').innerText = 'KES ' + Number(data.today.cashRevenue || 0).toLocaleString();
+          document.getElementById('txCount').innerText = data.today.transactionCount + ' sales today';
+          document.getElementById('catalogCount').innerText = (data.inventorySummary.totalProducts || 0) + ' items';
+          document.getElementById('lowStockCount').innerText = (data.inventorySummary.lowStockCount || 0) + ' items';
 
-        // Auto-unlock if PIN already saved in browser
-        window.onload = () => {
-          const savedPin = localStorage.getItem('pharmalink_owner_pin');
-          if (savedPin) {
-            currentPin = savedPin;
-            submitPin();
+          var list = document.getElementById('txList');
+          if (data.recentTransactions && data.recentTransactions.length > 0) {
+            list.innerHTML = data.recentTransactions.map(function(t) {
+              return '<div class="pt-2 flex justify-between items-center">' +
+                '<div>' +
+                  '<p class="font-bold text-slate-800">' + (t.refId || 'RECEIPT') + ' <span class="font-normal text-[10px] text-slate-400">(' + (t.method || 'CASH') + ')</span></p>' +
+                  '<p class="text-[10px] text-slate-400">' + (t.date || '') + '</p>' +
+                '</div>' +
+                '<span class="font-bold text-sm text-emerald-700">KES ' + Number(t.total || 0).toLocaleString() + '</span>' +
+              '</div>';
+            }).join('');
+          } else {
+            list.innerHTML = '<p class="text-center text-slate-400 py-4">No transactions recorded today.</p>';
           }
-        };
-      </script>
-    </body>
-    </html>
-  `);
+        })
+        .catch(function(e) {});
+    }
+
+    window.onload = function() {
+      var savedPin = sessionStorage.getItem('pharmalink_owner_pin');
+      if (savedPin) {
+        currentPin = savedPin;
+        submitPin();
+      }
+    };
+  </script>
+</body>
+</html>`;
+
+  res.send(html);
 });
 
-app.listen(PORT, () => console.log(`Secure Cloud API running on http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
