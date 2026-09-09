@@ -74,7 +74,6 @@ const getAccessToken = async (req, res, next) => {
     req.accessToken = response.data.access_token;
     next();
   } catch (error) {
-    console.error(`Safaricom Auth Error (${baseUrl}):`, error.response?.data || error.message);
     res.status(401).json({
       success: false,
       errorMessage: "Authentication failed with Safaricom. Check your Consumer Key & Secret."
@@ -316,6 +315,26 @@ app.get('/api/owner/:pharmacyId/summary', (req, res) => {
   });
 });
 
+// Endpoint: Change Owner PIN
+app.post('/api/owner/:pharmacyId/change-pin', (req, res) => {
+  const { currentPin, newPin } = req.body;
+  const activePin = String(MPESA_KEYS.ownerPin || '1234').trim();
+
+  if (String(currentPin || '').trim() !== activePin) {
+    return res.status(401).json({ success: false, error: 'Current PIN is incorrect.' });
+  }
+
+  const cleanNew = String(newPin || '').trim();
+  if (!/^\d{4}$/.test(cleanNew)) {
+    return res.status(400).json({ success: false, error: 'New PIN must be exactly 4 digits.' });
+  }
+
+  MPESA_KEYS.ownerPin = cleanNew;
+  saveMpesaConfig();
+  console.log(`[SECURITY] Owner PIN updated for ${req.params.pharmacyId}`);
+  res.json({ success: true, message: 'PIN updated successfully!' });
+});
+
 app.get('/owner', (req, res) => {
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -337,6 +356,7 @@ app.get('/owner', (req, res) => {
       </div>
       <h2 class="text-xl font-black text-white">Owner Security Lock</h2>
       <p class="text-xs text-slate-400">Enter your 4-digit PIN to view live sales</p>
+      <p class="text-[11px] text-emerald-400/80 font-mono">Default PIN: 1234</p>
     </div>
 
     <!-- 4-Dot Display -->
@@ -373,9 +393,14 @@ app.get('/owner', (req, res) => {
         <h1 class="text-lg font-black tracking-wide text-emerald-400">PharmaLink Live</h1>
         <p class="text-xs text-emerald-200">Owner Mobile Monitor</p>
       </div>
-      <button onclick="lockScreen()" class="bg-emerald-950 hover:bg-red-900/60 text-emerald-200 hover:text-red-200 text-xs font-bold px-3 py-1.5 rounded-xl border border-emerald-700 transition">
-        Lock
-      </button>
+      <div class="flex gap-2">
+        <button onclick="openChangePinModal()" class="bg-emerald-950 hover:bg-emerald-800 text-emerald-200 text-xs font-bold px-3 py-1.5 rounded-xl border border-emerald-700 transition">
+          Change PIN
+        </button>
+        <button onclick="lockScreen()" class="bg-emerald-950 hover:bg-red-900/60 text-emerald-200 hover:text-red-200 text-xs font-bold px-3 py-1.5 rounded-xl border border-emerald-700 transition">
+          Lock
+        </button>
+      </div>
     </div>
 
     <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
@@ -411,6 +436,36 @@ app.get('/owner', (req, res) => {
         <span class="text-xs text-slate-400" id="txCount">0 sales</span>
       </div>
       <div id="txList" class="space-y-2 max-h-80 overflow-y-auto divide-y divide-slate-100 text-xs"></div>
+    </div>
+  </div>
+
+  <!-- CHANGE PIN MODAL -->
+  <div id="changePinModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
+    <div class="bg-slate-900 border border-slate-700 rounded-3xl p-6 w-full max-w-xs text-center space-y-4 shadow-2xl">
+      <h3 class="text-white font-bold text-base">Change Security PIN</h3>
+      <p class="text-xs text-slate-400">Enter your current PIN and choose a new 4-digit PIN.</p>
+      
+      <div class="space-y-3 text-left">
+        <div>
+          <label class="text-[10px] uppercase font-bold text-slate-400">Current PIN</label>
+          <input id="oldPinInput" type="password" maxlength="4" placeholder="••••" class="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-white text-center font-mono text-lg outline-none focus:border-emerald-500 mt-1" />
+        </div>
+        <div>
+          <label class="text-[10px] uppercase font-bold text-slate-400">New 4-Digit PIN</label>
+          <input id="newPinInput" type="password" maxlength="4" placeholder="••••" class="w-full bg-slate-800 border border-slate-700 rounded-xl p-3 text-white text-center font-mono text-lg outline-none focus:border-emerald-500 mt-1" />
+        </div>
+      </div>
+
+      <p id="pinModalMsg" class="text-xs font-bold text-red-400 hidden"></p>
+
+      <div class="flex gap-2 pt-2">
+        <button onclick="closeChangePinModal()" class="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-bold transition">
+          Cancel
+        </button>
+        <button onclick="submitChangePin()" class="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition">
+          Save PIN
+        </button>
+      </div>
     </div>
   </div>
 
@@ -519,6 +574,52 @@ app.get('/owner', (req, res) => {
           }
         })
         .catch(function(e) {});
+    }
+
+    function openChangePinModal() {
+      document.getElementById('changePinModal').classList.remove('hidden');
+      document.getElementById('changePinModal').classList.add('flex');
+      document.getElementById('oldPinInput').value = '';
+      document.getElementById('newPinInput').value = '';
+      document.getElementById('pinModalMsg').classList.add('hidden');
+    }
+
+    function closeChangePinModal() {
+      document.getElementById('changePinModal').classList.add('hidden');
+      document.getElementById('changePinModal').classList.remove('flex');
+    }
+
+    function submitChangePin() {
+      var oldPin = document.getElementById('oldPinInput').value.trim();
+      var newPin = document.getElementById('newPinInput').value.trim();
+      var msg = document.getElementById('pinModalMsg');
+
+      if (oldPin.length !== 4 || newPin.length !== 4) {
+        msg.innerText = 'Both PINs must be 4 digits.';
+        msg.classList.remove('hidden');
+        return;
+      }
+
+      fetch('/api/owner/garissa-branch/change-pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currentPin: oldPin, newPin: newPin })
+      })
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        if (data.success) {
+          sessionStorage.setItem('pharmalink_owner_pin', newPin);
+          alert('Security PIN changed successfully!');
+          closeChangePinModal();
+        } else {
+          msg.innerText = data.error || 'Failed to change PIN.';
+          msg.classList.remove('hidden');
+        }
+      })
+      .catch(function() {
+        msg.innerText = 'Could not reach server.';
+        msg.classList.remove('hidden');
+      });
     }
 
     window.onload = function() {
