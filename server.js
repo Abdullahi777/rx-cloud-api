@@ -18,6 +18,7 @@ const TRANSACTIONS_FILE = path.join(__dirname, 'transactions_db.json');
 const MPESA_CONFIG_FILE = path.join(__dirname, 'mpesa.config.json');
 const MPESA_LOGS_FILE = path.join(__dirname, 'mpesa_transactions.json');
 const PHARMACIES_FILE = path.join(__dirname, 'pharmacies_registry.json');
+const VERSION_FILE = path.join(__dirname, 'version_info.json');
 
 const loadData = (file, defaultValue) => {
   try {
@@ -46,6 +47,13 @@ let pharmaciesRegistry = loadData(PHARMACIES_FILE, [
   }
 ]);
 
+let versionInfo = loadData(VERSION_FILE, {
+  version: "2.1.0",
+  releaseDate: new Date().toISOString().split('T')[0],
+  message: "Current stable production release with multi-pharmacy network support.",
+  downloadUrl: "https://rx-cloud-api-c2kx.onrender.com/downloads/PharmaLink_POS_Setup.exe"
+});
+
 let MPESA_KEYS = loadData(MPESA_CONFIG_FILE, {
   isSandbox: true,
   consumerKey: "ENTER_YOUR_SANDBOX_CONSUMER_KEY_HERE",
@@ -62,21 +70,44 @@ const saveTransactions = () => fs.writeFileSync(TRANSACTIONS_FILE, JSON.stringif
 const saveMpesaTransactions = () => fs.writeFileSync(MPESA_LOGS_FILE, JSON.stringify(mpesaTransactions, null, 2));
 const saveMpesaConfig = () => fs.writeFileSync(MPESA_CONFIG_FILE, JSON.stringify(MPESA_KEYS, null, 2));
 const savePharmacies = () => fs.writeFileSync(PHARMACIES_FILE, JSON.stringify(pharmaciesRegistry, null, 2));
+const saveVersionInfo = () => fs.writeFileSync(VERSION_FILE, JSON.stringify(versionInfo, null, 2));
 
 const getDarajaBaseUrl = () => MPESA_KEYS.isSandbox ? "https://sandbox.safaricom.co.ke" : "https://api.safaricom.co.ke";
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
 
 // ==========================================
-// 1. DYNAMIC PHARMACY NETWORK REGISTRY
+// 1. CLOUD VERSION REGISTRY (AUTO-UPDATES)
 // ==========================================
 
-// Register or Update a Pharmacy Branch (Called by POS on Settings Save)
+// Client POS calls this to check if a newer version exists
+app.get('/api/pos/version', (req, res) => {
+  res.json(versionInfo);
+});
+
+// You call this when releasing a new version
+app.post('/api/pos/version', (req, res) => {
+  const { version, message, downloadUrl, pin } = req.body;
+  if (String(pin || '').trim() !== String(MPESA_KEYS.ownerPin || '1234').trim()) {
+    return res.status(401).json({ error: "Unauthorized: Invalid Security PIN" });
+  }
+  if (version) versionInfo.version = String(version).trim();
+  if (message) versionInfo.message = String(message).trim();
+  if (downloadUrl) versionInfo.downloadUrl = String(downloadUrl).trim();
+  versionInfo.releaseDate = new Date().toISOString().split('T')[0];
+
+  saveVersionInfo();
+  console.log(`[RELEASE] Published new version: v${versionInfo.version}`);
+  res.json({ success: true, message: "New version published!", versionInfo });
+});
+
+// ==========================================
+// 2. MULTI-TENANT PHARMACY REGISTRY
+// ==========================================
+
 app.post('/api/pharmacies/register', (req, res) => {
   const { pharmacyId, name, branch, town, phone, address, tillNumber } = req.body;
-  if (!pharmacyId || !name) {
-    return res.status(400).json({ error: 'pharmacyId and name are required' });
-  }
+  if (!pharmacyId || !name) return res.status(400).json({ error: 'Missing fields' });
 
   const cleanId = String(pharmacyId).toLowerCase().replace(/[^a-z0-9-]/g, '');
   const existingIdx = pharmaciesRegistry.findIndex(p => p.pharmacyId === cleanId);
@@ -103,7 +134,6 @@ app.post('/api/pharmacies/register', (req, res) => {
   res.json({ success: true, pharmacy: pharmacyData });
 });
 
-// Return All Partner Pharmacies for Doctor Portal
 app.get('/api/pharmacies', (req, res) => {
   const list = pharmaciesRegistry.map(p => ({
     ...p,
@@ -113,7 +143,7 @@ app.get('/api/pharmacies', (req, res) => {
 });
 
 // ==========================================
-// 2. M-PESA DARAJA ENGINE
+// 3. M-PESA DARAJA ENGINE
 // ==========================================
 
 const getAccessToken = async (req, res, next) => {
@@ -266,7 +296,7 @@ app.get("/api/mpesa/verify", (req, res) => {
 });
 
 // ==========================================
-// 3. POS INVENTORY & PRESCRIPTION ROUTES
+// 4. POS INVENTORY & PRESCRIPTION ROUTES
 // ==========================================
 
 app.post('/api/pos/sync-inventory', (req, res) => {
@@ -423,7 +453,7 @@ app.post('/api/owner/:pharmacyId/change-pin', (req, res) => {
 });
 
 // ==========================================
-// 4. SECURE OWNER MOBILE DASHBOARD (MULTI-BRANCH)
+// 5. SECURE OWNER MOBILE DASHBOARD (MULTI-BRANCH)
 // ==========================================
 app.get('/owner', (req, res) => {
   const html = `<!DOCTYPE html>
@@ -446,7 +476,6 @@ app.get('/owner', (req, res) => {
       <h2 class="text-xl font-black text-white">Owner Security Lock</h2>
       <p class="text-xs text-slate-400">Select branch and enter your 4-digit PIN</p>
       
-      <!-- Dynamic Pharmacy Branch Selector -->
       <select id="branchSelect" class="w-full bg-slate-800 border border-slate-700 rounded-xl p-2.5 text-xs text-emerald-300 font-bold outline-none mt-2">
       </select>
     </div>
