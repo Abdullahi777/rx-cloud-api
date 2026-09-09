@@ -17,6 +17,7 @@ const INVENTORY_FILE = path.join(__dirname, 'inventory_db.json');
 const TRANSACTIONS_FILE = path.join(__dirname, 'transactions_db.json');
 const MPESA_CONFIG_FILE = path.join(__dirname, 'mpesa.config.json');
 const MPESA_LOGS_FILE = path.join(__dirname, 'mpesa_transactions.json');
+const PHARMACIES_FILE = path.join(__dirname, 'pharmacies_registry.json');
 
 const loadData = (file, defaultValue) => {
   try {
@@ -33,6 +34,17 @@ let prescriptions = loadData(DB_FILE, []);
 let inventoryStore = loadData(INVENTORY_FILE, {});
 let transactionsStore = loadData(TRANSACTIONS_FILE, {});
 let mpesaTransactions = loadData(MPESA_LOGS_FILE, []);
+let pharmaciesRegistry = loadData(PHARMACIES_FILE, [
+  {
+    pharmacyId: 'garissa-branch',
+    name: 'PharmaLink',
+    branch: 'Garissa Branch',
+    town: 'Garissa',
+    phone: '+254 700 000 000',
+    address: 'Kismayu Road, Garissa',
+    registeredAt: new Date().toISOString()
+  }
+]);
 
 let MPESA_KEYS = loadData(MPESA_CONFIG_FILE, {
   isSandbox: true,
@@ -49,10 +61,60 @@ const saveInventory = () => fs.writeFileSync(INVENTORY_FILE, JSON.stringify(inve
 const saveTransactions = () => fs.writeFileSync(TRANSACTIONS_FILE, JSON.stringify(transactionsStore, null, 2));
 const saveMpesaTransactions = () => fs.writeFileSync(MPESA_LOGS_FILE, JSON.stringify(mpesaTransactions, null, 2));
 const saveMpesaConfig = () => fs.writeFileSync(MPESA_CONFIG_FILE, JSON.stringify(MPESA_KEYS, null, 2));
+const savePharmacies = () => fs.writeFileSync(PHARMACIES_FILE, JSON.stringify(pharmaciesRegistry, null, 2));
 
 const getDarajaBaseUrl = () => MPESA_KEYS.isSandbox ? "https://sandbox.safaricom.co.ke" : "https://api.safaricom.co.ke";
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
+
+// ==========================================
+// 1. DYNAMIC PHARMACY NETWORK REGISTRY
+// ==========================================
+
+// Register or Update a Pharmacy Branch (Called by POS on Settings Save)
+app.post('/api/pharmacies/register', (req, res) => {
+  const { pharmacyId, name, branch, town, phone, address, tillNumber } = req.body;
+  if (!pharmacyId || !name) {
+    return res.status(400).json({ error: 'pharmacyId and name are required' });
+  }
+
+  const cleanId = String(pharmacyId).toLowerCase().replace(/[^a-z0-9-]/g, '');
+  const existingIdx = pharmaciesRegistry.findIndex(p => p.pharmacyId === cleanId);
+
+  const pharmacyData = {
+    pharmacyId: cleanId,
+    name: String(name).trim(),
+    branch: String(branch || 'Main').trim(),
+    town: String(town || 'Garissa').trim(),
+    phone: String(phone || '').trim(),
+    address: String(address || '').trim(),
+    tillNumber: String(tillNumber || '').trim(),
+    lastActiveAt: new Date().toISOString()
+  };
+
+  if (existingIdx >= 0) {
+    pharmaciesRegistry[existingIdx] = { ...pharmaciesRegistry[existingIdx], ...pharmacyData };
+  } else {
+    pharmaciesRegistry.push({ ...pharmacyData, registeredAt: new Date().toISOString() });
+  }
+
+  savePharmacies();
+  console.log(`[NETWORK DIRECTORY] Registered: ${cleanId} (${name} - ${branch}, ${town})`);
+  res.json({ success: true, pharmacy: pharmacyData });
+});
+
+// Return All Partner Pharmacies for Doctor Portal
+app.get('/api/pharmacies', (req, res) => {
+  const list = pharmaciesRegistry.map(p => ({
+    ...p,
+    catalogCount: (inventoryStore[p.pharmacyId] || []).length
+  }));
+  res.json(list);
+});
+
+// ==========================================
+// 2. M-PESA DARAJA ENGINE
+// ==========================================
 
 const getAccessToken = async (req, res, next) => {
   const baseUrl = getDarajaBaseUrl();
@@ -203,6 +265,10 @@ app.get("/api/mpesa/verify", (req, res) => {
   }
 });
 
+// ==========================================
+// 3. POS INVENTORY & PRESCRIPTION ROUTES
+// ==========================================
+
 app.post('/api/pos/sync-inventory', (req, res) => {
   const { pharmacyId, items } = req.body;
   if (!pharmacyId || !Array.isArray(items)) return res.status(400).json({ error: 'Invalid payload' });
@@ -247,6 +313,7 @@ app.post('/api/prescriptions', (req, res) => {
 
   prescriptions.unshift(newRx);
   savePrescriptions();
+  console.log(`[PRESCRIPTION] Created ${rxId} for ${patientName} -> ${newRx.pharmacyId}`);
   res.status(201).json(newRx);
 });
 
@@ -280,7 +347,6 @@ app.post('/api/pos/sync-transactions', (req, res) => {
   res.json({ status: 'success' });
 });
 
-// Detailed Summary & Historical Reports Endpoint
 app.get('/api/owner/:pharmacyId/summary', (req, res) => {
   const { pharmacyId } = req.params;
   const { pin } = req.query;
@@ -300,7 +366,6 @@ app.get('/api/owner/:pharmacyId/summary', (req, res) => {
   const mpesaRevenue = todayTxns.filter(t => t.method === 'MPESA').reduce((sum, t) => sum + (Number(t.total) || 0), 0);
   const cashRevenue = todayTxns.filter(t => t.method === 'CASH').reduce((sum, t) => sum + (Number(t.total) || 0), 0);
 
-  // Group all past transactions by day for historical reports
   const dailyHistory = {};
   txns.forEach(t => {
     const d = t.isoDate || (t.date ? String(t.date).split(',')[0].trim() : 'Unknown');
@@ -338,7 +403,6 @@ app.get('/api/owner/:pharmacyId/summary', (req, res) => {
   });
 });
 
-// Endpoint: Change Owner PIN
 app.post('/api/owner/:pharmacyId/change-pin', (req, res) => {
   const { currentPin, newPin } = req.body;
   const activePin = String(MPESA_KEYS.ownerPin || '1234').trim();
@@ -359,9 +423,8 @@ app.post('/api/owner/:pharmacyId/change-pin', (req, res) => {
 });
 
 // ==========================================
-// SECURE OWNER MOBILE DASHBOARD (WITH REPORTS & HISTORY)
+// 4. SECURE OWNER MOBILE DASHBOARD (MULTI-BRANCH)
 // ==========================================
-
 app.get('/owner', (req, res) => {
   const html = `<!DOCTYPE html>
 <html lang="en">
@@ -371,9 +434,8 @@ app.get('/owner', (req, res) => {
   <title>PharmaLink - Owner Live & Reports</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-slate-900 text-slate-800 font-sans min-h-screen flex flex-col justify-center p-3 selection:bg-emerald-500 selection:text-white">
+<body class="bg-slate-900 text-slate-800 font-sans min-h-screen flex flex-col justify-center p-3">
 
-  <!-- PIN LOCKPAD SCREEN -->
   <div id="pinScreen" class="max-w-xs mx-auto w-full text-center space-y-6">
     <div class="space-y-2">
       <div class="w-16 h-16 bg-emerald-600/20 border border-emerald-500/30 rounded-3xl flex items-center justify-center mx-auto text-emerald-400">
@@ -382,10 +444,13 @@ app.get('/owner', (req, res) => {
         </svg>
       </div>
       <h2 class="text-xl font-black text-white">Owner Security Lock</h2>
-      <p class="text-xs text-slate-400">Enter your 4-digit PIN to access live monitor & reports</p>
+      <p class="text-xs text-slate-400">Select branch and enter your 4-digit PIN</p>
+      
+      <!-- Dynamic Pharmacy Branch Selector -->
+      <select id="branchSelect" class="w-full bg-slate-800 border border-slate-700 rounded-xl p-2.5 text-xs text-emerald-300 font-bold outline-none mt-2">
+      </select>
     </div>
 
-    <!-- 4-Dot Display -->
     <div class="flex justify-center gap-4 py-2">
       <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot0"></span>
       <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot1"></span>
@@ -395,7 +460,6 @@ app.get('/owner', (req, res) => {
 
     <p id="errorMsg" class="text-xs font-bold text-red-400 hidden">Incorrect PIN. Try again.</p>
 
-    <!-- Keypad -->
     <div class="grid grid-cols-3 gap-3 pt-2">
       <button onclick="pressKey('1')" class="h-14 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700">1</button>
       <button onclick="pressKey('2')" class="h-14 bg-slate-800 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700">2</button>
@@ -412,13 +476,11 @@ app.get('/owner', (req, res) => {
     </div>
   </div>
 
-  <!-- MAIN DASHBOARD (HIDDEN UNTIL UNLOCKED) -->
   <div id="dashboardScreen" class="max-w-md mx-auto w-full space-y-4 hidden pb-12">
-    <!-- Header -->
     <div class="bg-emerald-900 text-white p-5 rounded-3xl shadow-xl flex justify-between items-center border border-emerald-800">
       <div>
-        <h1 class="text-lg font-black tracking-wide text-emerald-400">PharmaLink Live</h1>
-        <p class="text-xs text-emerald-200">Owner Monitor & Reports</p>
+        <h1 class="text-lg font-black tracking-wide text-emerald-400" id="dashStoreTitle">PharmaLink Live</h1>
+        <p class="text-xs text-emerald-200" id="dashBranchSubtitle">Owner Monitor & Reports</p>
       </div>
       <div class="flex gap-1.5">
         <button onclick="openChangePinModal()" class="bg-emerald-950 hover:bg-emerald-800 text-emerald-200 text-xs font-bold px-2.5 py-1.5 rounded-xl border border-emerald-700 transition">
@@ -430,7 +492,6 @@ app.get('/owner', (req, res) => {
       </div>
     </div>
 
-    <!-- TAB SWITCHER: TODAY vs REPORTS -->
     <div class="grid grid-cols-2 gap-2 bg-slate-200 p-1.5 rounded-2xl">
       <button id="tabTodayBtn" onclick="switchView('today')" class="py-2 text-xs font-bold rounded-xl bg-white text-slate-900 shadow-sm transition">
         Live Today
@@ -440,7 +501,6 @@ app.get('/owner', (req, res) => {
       </button>
     </div>
 
-    <!-- VIEW 1: TODAY'S LIVE MONITOR -->
     <div id="todayView" class="space-y-4">
       <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
         <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Today's Sales</span>
@@ -478,24 +538,18 @@ app.get('/owner', (req, res) => {
       </div>
     </div>
 
-    <!-- VIEW 2: HISTORICAL REPORTS & DAILY LOGS -->
     <div id="reportsView" class="space-y-4 hidden">
-      <!-- All-Time Revenue Card -->
       <div class="bg-gradient-to-r from-slate-900 to-slate-800 text-white p-5 rounded-3xl shadow-md border border-slate-700 space-y-2">
         <span class="text-[10px] font-bold uppercase text-emerald-400 tracking-wider">All-Time Recorded Sales</span>
         <div class="text-3xl font-black text-white" id="allTimeRevenue">KES 0</div>
         <p class="text-xs text-slate-400" id="allTimeCount">0 total transactions</p>
       </div>
 
-      <!-- Daily Sales Summary Breakdown -->
       <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
         <h3 class="font-bold text-sm text-slate-800 border-b pb-2">Daily Revenue History</h3>
-        <div id="dailyList" class="space-y-2.5 max-h-60 overflow-y-auto text-xs divide-y divide-slate-100">
-          <p class="text-slate-400 text-center py-3">Loading daily reports...</p>
-        </div>
+        <div id="dailyList" class="space-y-2.5 max-h-60 overflow-y-auto text-xs divide-y divide-slate-100"></div>
       </div>
 
-      <!-- Full Historical Transactions Feed -->
       <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
         <div class="flex justify-between items-center border-b pb-2">
           <h3 class="font-bold text-sm text-slate-800">All Past Receipts</h3>
@@ -504,14 +558,12 @@ app.get('/owner', (req, res) => {
         <div id="allTxList" class="space-y-2 max-h-96 overflow-y-auto divide-y divide-slate-100 text-xs"></div>
       </div>
     </div>
-
   </div>
 
-  <!-- CHANGE PIN MODAL -->
   <div id="changePinModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
     <div class="bg-slate-900 border border-slate-700 rounded-3xl p-6 w-full max-w-xs text-center space-y-4 shadow-2xl">
       <h3 class="text-white font-bold text-base">Change Security PIN</h3>
-      <p class="text-xs text-slate-400">Enter your current PIN and choose a new 4-digit PIN.</p>
+      <p class="text-xs text-slate-400">Enter current PIN and choose new 4-digit PIN.</p>
       
       <div class="space-y-3 text-left">
         <div>
@@ -527,17 +579,12 @@ app.get('/owner', (req, res) => {
       <p id="pinModalMsg" class="text-xs font-bold text-red-400 hidden"></p>
 
       <div class="flex gap-2 pt-2">
-        <button onclick="closeChangePinModal()" class="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-bold transition">
-          Cancel
-        </button>
-        <button onclick="submitChangePin()" class="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition">
-          Save PIN
-        </button>
+        <button onclick="closeChangePinModal()" class="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-bold transition">Cancel</button>
+        <button onclick="submitChangePin()" class="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition">Save PIN</button>
       </div>
     </div>
   </div>
 
-  <!-- RECEIPT ITEMS DETAIL MODAL -->
   <div id="receiptModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm hidden items-center justify-center p-4 z-50">
     <div class="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl text-xs">
       <div class="flex justify-between items-start border-b pb-3">
@@ -547,20 +594,15 @@ app.get('/owner', (req, res) => {
         </div>
         <button onclick="closeReceiptModal()" class="text-slate-400 hover:text-slate-600 font-bold text-base">&times;</button>
       </div>
-
       <div>
         <h5 class="font-bold text-slate-600 uppercase text-[10px] mb-2">Sold Medications</h5>
         <div id="receiptModalItems" class="space-y-1.5 divide-y divide-slate-100 max-h-48 overflow-y-auto"></div>
       </div>
-
       <div class="border-t pt-3 flex justify-between items-center text-sm font-bold">
         <span>Total Paid:</span>
         <span class="text-emerald-700" id="receiptModalTotal">KES 0</span>
       </div>
-
-      <button onclick="closeReceiptModal()" class="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold">
-        Close
-      </button>
+      <button onclick="closeReceiptModal()" class="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold">Close</button>
     </div>
   </div>
 
@@ -568,6 +610,30 @@ app.get('/owner', (req, res) => {
     var currentPin = '';
     var pollTimer = null;
     var cachedData = null;
+    var activePharmacyId = 'garissa-branch';
+
+    function loadBranches() {
+      fetch('/api/pharmacies')
+        .then(function(r) { return r.json(); })
+        .then(function(list) {
+          var select = document.getElementById('branchSelect');
+          if (Array.isArray(list) && list.length > 0) {
+            select.innerHTML = list.map(function(p) {
+              return '<option value="' + p.pharmacyId + '">' + p.name + ' - ' + p.branch + ' (' + p.town + ')</option>';
+            }).join('');
+            var urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.get('pharmacy')) {
+              select.value = urlParams.get('pharmacy');
+            }
+            activePharmacyId = select.value || 'garissa-branch';
+          }
+        }).catch(function(e) {});
+    }
+
+    document.getElementById('branchSelect').onchange = function(e) {
+      activePharmacyId = e.target.value;
+      clearPin();
+    };
 
     function updateDots() {
       for (var i = 0; i < 4; i++) {
@@ -584,9 +650,7 @@ app.get('/owner', (req, res) => {
       if (currentPin.length >= 4) return;
       currentPin += num;
       updateDots();
-      if (currentPin.length === 4) {
-        submitPin();
-      }
+      if (currentPin.length === 4) submitPin();
     }
 
     function clearPin() {
@@ -602,10 +666,12 @@ app.get('/owner', (req, res) => {
 
     function submitPin() {
       var pin = currentPin;
-      fetch('/api/owner/garissa-branch/summary?pin=' + encodeURIComponent(pin))
+      var pId = activePharmacyId || 'garissa-branch';
+      fetch('/api/owner/' + pId + '/summary?pin=' + encodeURIComponent(pin))
         .then(function(res) {
           if (res.status === 200) {
             sessionStorage.setItem('pharmalink_owner_pin', pin);
+            sessionStorage.setItem('pharmalink_active_branch', pId);
             showDashboard();
           } else {
             document.getElementById('errorMsg').classList.remove('hidden');
@@ -658,9 +724,10 @@ app.get('/owner', (req, res) => {
 
     function fetchOwnerData() {
       var pin = sessionStorage.getItem('pharmalink_owner_pin');
+      var pId = sessionStorage.getItem('pharmalink_active_branch') || activePharmacyId || 'garissa-branch';
       if (!pin) return lockScreen();
 
-      fetch('/api/owner/garissa-branch/summary?pin=' + encodeURIComponent(pin))
+      fetch('/api/owner/' + pId + '/summary?pin=' + encodeURIComponent(pin))
         .then(function(res) {
           if (res.status === 401) return lockScreen();
           return res.json();
@@ -791,7 +858,8 @@ app.get('/owner', (req, res) => {
         return;
       }
 
-      fetch('/api/owner/:pharmacyId/change-pin'.replace(':pharmacyId', 'garissa-branch'), {
+      var pId = sessionStorage.getItem('pharmalink_active_branch') || activePharmacyId || 'garissa-branch';
+      fetch('/api/owner/' + pId + '/change-pin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ currentPin: oldPin, newPin: newPin })
@@ -814,6 +882,7 @@ app.get('/owner', (req, res) => {
     }
 
     window.onload = function() {
+      loadBranches();
       var savedPin = sessionStorage.getItem('pharmalink_owner_pin');
       if (savedPin) {
         currentPin = savedPin;
