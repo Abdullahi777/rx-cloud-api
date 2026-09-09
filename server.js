@@ -36,14 +36,15 @@ let inventoryStore = loadData(INVENTORY_FILE, {});
 let transactionsStore = loadData(TRANSACTIONS_FILE, {});
 let mpesaTransactions = loadData(MPESA_LOGS_FILE, []);
 
-// M-Pesa Configuration (Defaults to Daraja Sandbox for Testing)
+// M-Pesa & Security Configuration
 let MPESA_KEYS = loadData(MPESA_CONFIG_FILE, {
   isSandbox: true,
   consumerKey: "ENTER_YOUR_SANDBOX_CONSUMER_KEY_HERE",
   consumerSecret: "ENTER_YOUR_SANDBOX_CONSUMER_SECRET_HERE",
   businessShortCode: "174379",
   passkey: "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919",
-  callbackUrl: "https://rx-cloud-api-c2kx.onrender.com/api/mpesa/callback"
+  callbackUrl: "https://rx-cloud-api-c2kx.onrender.com/api/mpesa/callback",
+  ownerPin: "1234" // Default Owner PIN
 });
 
 const savePrescriptions = () => fs.writeFileSync(DB_FILE, JSON.stringify(prescriptions, null, 2));
@@ -61,7 +62,6 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Dat
 // M-PESA DARAJA ENGINE (CLOUD HOSTED)
 // ==========================================
 
-// Middleware: Generate Safaricom OAuth Access Token
 const getAccessToken = async (req, res, next) => {
   const baseUrl = getDarajaBaseUrl();
   const cKey = String(MPESA_KEYS.consumerKey || '').trim();
@@ -90,22 +90,20 @@ const getAccessToken = async (req, res, next) => {
   }
 };
 
-// M-Pesa Endpoint 1: Update API Keys from POS Settings
 app.post("/api/settings", (req, res) => {
   const newKeys = req.body;
   if (newKeys.consumerKey) MPESA_KEYS.consumerKey = newKeys.consumerKey.trim();
   if (newKeys.consumerSecret) MPESA_KEYS.consumerSecret = newKeys.consumerSecret.trim();
   if (newKeys.businessShortCode) MPESA_KEYS.businessShortCode = newKeys.businessShortCode.trim();
   if (newKeys.passkey) MPESA_KEYS.passkey = newKeys.passkey.trim();
+  if (newKeys.ownerPin) MPESA_KEYS.ownerPin = String(newKeys.ownerPin).trim();
   if (newKeys.isSandbox !== undefined) MPESA_KEYS.isSandbox = Boolean(newKeys.isSandbox);
   MPESA_KEYS.callbackUrl = "https://rx-cloud-api-c2kx.onrender.com/api/mpesa/callback";
 
   saveMpesaConfig();
-  console.log(`M-Pesa Config Updated. Environment: ${MPESA_KEYS.isSandbox ? "Sandbox" : "Production"}`);
-  res.json({ success: true, message: "M-Pesa credentials saved." });
+  res.json({ success: true, message: "Settings saved successfully." });
 });
 
-// M-Pesa Endpoint 2: Trigger STK Push Prompt
 app.post("/api/mpesa/stkpush", getAccessToken, async (req, res) => {
   const { phone, phoneNumber, amount, accountReference } = req.body;
   const rawPhone = String(phone || phoneNumber || "").replace(/\s+/g, "");
@@ -133,7 +131,6 @@ app.post("/api/mpesa/stkpush", getAccessToken, async (req, res) => {
     : "CustomerBuyGoodsOnline";
 
   const baseUrl = getDarajaBaseUrl();
-  console.log(`[STK PUSH] Sending to ${formattedPhone} for Ksh ${amount} (${baseUrl})...`);
 
   try {
     const response = await axios.post(
@@ -160,18 +157,14 @@ app.post("/api/mpesa/stkpush", getAccessToken, async (req, res) => {
       checkoutRequestId: response.data.CheckoutRequestID || response.data.checkoutRequestID
     });
   } catch (error) {
-    const errDetails = error.response?.data || error.message;
-    console.error(`[STK ERROR]:`, errDetails);
     res.status(500).json({
       success: false,
-      errorMessage: errDetails.errorMessage || "STK Push Failed. Check credentials."
+      errorMessage: error.response?.data?.errorMessage || "STK Push Failed."
     });
   }
 });
 
-// M-Pesa Endpoint 3: Public HTTPS Webhook for Safaricom Callbacks
 app.post("/api/mpesa/callback", (req, res) => {
-  console.log("[SAFARICOM CALLBACK RECEIVED]:", JSON.stringify(req.body));
   try {
     const body = req.body;
     let transaction = null;
@@ -191,18 +184,15 @@ app.post("/api/mpesa/callback", (req, res) => {
     }
 
     if (transaction) {
-      console.log("[PAYMENT CONFIRMED]:", transaction.id, "KES", transaction.amount);
       mpesaTransactions.unshift(transaction);
       saveMpesaTransactions();
     }
     res.json({ result: "success" });
   } catch (error) {
-    console.error("Callback Error:", error);
     res.status(500).send("Error");
   }
 });
 
-// M-Pesa Endpoint 4: Verify Payment Status
 app.get("/api/mpesa/verify", (req, res) => {
   const { phone, amount, checkoutRequestId } = req.query;
   const cleanPhone = phone ? phone.replace(/^254|^0/, "") : "";
@@ -218,7 +208,7 @@ app.get("/api/mpesa/verify", (req, res) => {
   if (match) {
     res.json({ success: true, transaction: match });
   } else {
-    res.json({ success: false, message: "Waiting for customer PIN..." });
+    res.json({ success: false, message: "Waiting for PIN..." });
   }
 });
 
@@ -232,7 +222,6 @@ app.post('/api/pos/sync-inventory', (req, res) => {
 
   inventoryStore[pharmacyId] = items;
   saveInventory();
-  console.log(`[SYNC] Synced ${items.length} items for ${pharmacyId}`);
   res.json({ status: 'success', count: items.length });
 });
 
@@ -271,7 +260,6 @@ app.post('/api/prescriptions', (req, res) => {
 
   prescriptions.unshift(newRx);
   savePrescriptions();
-  console.log(`[PRESCRIPTION] Created ${rxId} for ${patientName}`);
   res.status(201).json(newRx);
 });
 
@@ -292,8 +280,6 @@ app.post('/api/prescriptions/:id/dispense', (req, res) => {
   rx.status = 'dispensed';
   rx.dispensedAt = new Date().toISOString();
   savePrescriptions();
-
-  console.log(`[DISPENSED] ${rx.id} fulfilled!`);
   res.json({ status: 'success', prescription: rx });
 });
 
@@ -301,19 +287,26 @@ app.post('/api/pos/sync-transactions', (req, res) => {
   const { pharmacyId, transaction } = req.body;
   if (!pharmacyId || !transaction) return res.status(400).json({ error: 'Missing fields' });
 
-  if (!transactionsStore[pharmacyId]) {
-    transactionsStore[pharmacyId] = [];
-  }
-
+  if (!transactionsStore[pharmacyId]) transactionsStore[pharmacyId] = [];
   transactionsStore[pharmacyId].unshift(transaction);
   saveTransactions();
-
-  console.log(`[SALE SYNC] ${pharmacyId}: KES ${transaction.total} via ${transaction.method}`);
   res.json({ status: 'success' });
 });
 
+// ==========================================
+// SECURE OWNER MOBILE SUMMARY API (PIN PROTECTED)
+// ==========================================
+
 app.get('/api/owner/:pharmacyId/summary', (req, res) => {
   const { pharmacyId } = req.params;
+  const { pin } = req.query;
+
+  // Verify PIN (default: '1234')
+  const validPin = String(MPESA_KEYS.ownerPin || '1234').trim();
+  if (String(pin || '').trim() !== validPin) {
+    return res.status(401).json({ error: 'Invalid Owner Security PIN' });
+  }
+
   const txns = transactionsStore[pharmacyId] || [];
   const inventory = inventoryStore[pharmacyId] || [];
 
@@ -340,31 +333,79 @@ app.get('/api/owner/:pharmacyId/summary', (req, res) => {
   });
 });
 
-// Owner Mobile Dashboard
+// ==========================================
+// SECURE OWNER MOBILE DASHBOARD (PIN KEYPAD)
+// ==========================================
+
 app.get('/owner', (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html lang="en">
     <head>
       <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>PharmaLink - Owner Mobile Dashboard</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+      <title>PharmaLink - Owner Security Access</title>
       <script src="https://cdn.tailwindcss.com"></script>
     </head>
-    <body class="bg-slate-100 text-slate-800 font-sans p-4">
-      <div class="max-w-md mx-auto space-y-4">
-        <div class="bg-emerald-900 text-white p-5 rounded-3xl shadow-lg flex justify-between items-center">
+    <body class="bg-slate-900 text-slate-800 font-sans min-h-screen flex flex-col justify-center p-4 selection:bg-emerald-500 selection:text-white">
+      
+      <!-- 1. PIN LOCKPAD SCREEN -->
+      <div id="pinScreen" class="max-w-xs mx-auto w-full text-center space-y-6">
+        <div class="space-y-2">
+          <div class="w-16 h-16 bg-emerald-600/20 border border-emerald-500/30 rounded-3xl flex items-center justify-center mx-auto text-emerald-400">
+            <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+          </div>
+          <h2 class="text-xl font-black text-white">Owner Security Lock</h2>
+          <p class="text-xs text-slate-400">Enter your 4-digit PIN to view live sales</p>
+        </div>
+
+        <!-- 4-Dot Display -->
+        <div class="flex justify-center gap-4 py-2" id="dotsContainer">
+          <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot0"></span>
+          <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot1"></span>
+          <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot2"></span>
+          <span class="w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all" id="dot3"></span>
+        </div>
+
+        <p id="errorMsg" class="text-xs font-bold text-red-400 hidden">Incorrect PIN. Try again.</p>
+
+        <!-- Numeric Keypad -->
+        <div class="grid grid-cols-3 gap-3 pt-2">
+          ${.map(n => `
+            <button onclick="pressKey('${n}')" class="h-14 bg-slate-800/80 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700/50">
+              ${n}
+            </button>
+          `).join('')}
+          <button onclick="clearPin()" class="h-14 bg-slate-800/40 text-slate-400 font-bold text-xs rounded-2xl active:scale-95 transition">
+            CLEAR
+          </button>
+          <button onclick="pressKey('0')" class="h-14 bg-slate-800/80 hover:bg-slate-700 text-white font-bold text-xl rounded-2xl active:scale-95 transition border border-slate-700/50">
+            0
+          </button>
+          <button onclick="backspace()" class="h-14 bg-slate-800/40 text-slate-400 font-bold text-xs rounded-2xl active:scale-95 transition flex items-center justify-center">
+            ⌫
+          </button>
+        </div>
+      </div>
+
+      <!-- 2. MAIN DASHBOARD SCREEN (HIDDEN UNTIL UNLOCKED) -->
+      <div id="dashboardScreen" class="max-w-md mx-auto w-full space-y-4 hidden pb-12">
+        <!-- Header -->
+        <div class="bg-emerald-900 text-white p-5 rounded-3xl shadow-xl flex justify-between items-center border border-emerald-800">
           <div>
             <h1 class="text-lg font-black tracking-wide text-emerald-400">PharmaLink Live</h1>
             <p class="text-xs text-emerald-200">Owner Mobile Monitor</p>
           </div>
-          <span class="bg-emerald-500/20 text-emerald-300 text-xs px-3 py-1 rounded-full font-bold border border-emerald-500/30">
-            Live POS
-          </span>
+          <button onclick="lockScreen()" class="bg-emerald-950 hover:bg-red-900/60 text-emerald-200 hover:text-red-200 text-xs font-bold px-3 py-1.5 rounded-xl border border-emerald-700 transition">
+            Lock
+          </button>
         </div>
+
+        <!-- Sales Card -->
         <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
           <span class="text-xs font-bold text-slate-400 uppercase tracking-wider">Today's Total Sales</span>
           <div class="text-3xl font-black text-slate-900" id="totalSales">KES 0</div>
+          
           <div class="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100">
             <div class="bg-green-50 p-3 rounded-2xl border border-green-100">
               <span class="text-[10px] font-bold text-green-700 uppercase">M-Pesa</span>
@@ -376,30 +417,106 @@ app.get('/owner', (req, res) => {
             </div>
           </div>
         </div>
+
+        <!-- Inventory Stats -->
         <div class="grid grid-cols-2 gap-3">
           <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-            <span class="text-[10px] font-bold text-slate-400 uppercase">Total Catalog</span>
+            <span class="text-[10px] font-bold text-slate-400 uppercase">Catalog Items</span>
             <p class="text-xl font-black text-slate-800" id="catalogCount">0 items</p>
           </div>
           <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-            <span class="text-[10px] font-bold text-orange-600 uppercase">Low Stock Alert</span>
+            <span class="text-[10px] font-bold text-orange-600 uppercase">Low Stock</span>
             <p class="text-xl font-black text-orange-600" id="lowStockCount">0 items</p>
           </div>
         </div>
+
+        <!-- Receipts Feed -->
         <div class="bg-white p-5 rounded-3xl shadow-sm border border-slate-200 space-y-3">
           <div class="flex justify-between items-center border-b pb-2">
             <h3 class="font-bold text-sm text-slate-800">Recent Receipts</h3>
             <span class="text-xs text-slate-400" id="txCount">0 sales</span>
           </div>
-          <div id="txList" class="space-y-2 max-h-80 overflow-y-auto divide-y divide-slate-100 text-xs">
-            <p class="text-center text-slate-400 py-4">Waiting for live sales...</p>
-          </div>
+          <div id="txList" class="space-y-2 max-h-80 overflow-y-auto divide-y divide-slate-100 text-xs"></div>
         </div>
       </div>
+
       <script>
-        async function fetchOwnerData() {
+        let currentPin = '';
+        let pollTimer = null;
+
+        function updateDots() {
+          for (let i = 0; i < 4; i++) {
+            const dot = document.getElementById('dot' + i);
+            if (i < currentPin.length) {
+              dot.className = "w-4 h-4 rounded-full bg-emerald-400 border-2 border-emerald-400 scale-110 transition-all";
+            } else {
+              dot.className = "w-4 h-4 rounded-full border-2 border-slate-600 bg-slate-800 transition-all";
+            }
+          }
+        }
+
+        function pressKey(num) {
+          if (currentPin.length >= 4) return;
+          currentPin += num;
+          updateDots();
+          if (currentPin.length === 4) {
+            submitPin();
+          }
+        }
+
+        function clearPin() {
+          currentPin = '';
+          updateDots();
+          document.getElementById('errorMsg').classList.add('hidden');
+        }
+
+        function backspace() {
+          currentPin = currentPin.slice(0, -1);
+          updateDots();
+        }
+
+        async function submitPin() {
+          const pin = currentPin;
           try {
-            const res = await fetch('/api/owner/garissa-branch/summary');
+            const res = await fetch('/api/owner/garissa-branch/summary?pin=' + pin);
+            if (res.status === 200) {
+              localStorage.setItem('pharmalink_owner_pin', pin);
+              showDashboard();
+            } else {
+              document.getElementById('errorMsg').classList.remove('hidden');
+              clearPin();
+            }
+          } catch(e) {
+            alert("Could not reach server.");
+            clearPin();
+          }
+        }
+
+        function showDashboard() {
+          document.getElementById('pinScreen').classList.add('hidden');
+          document.getElementById('dashboardScreen').classList.remove('hidden');
+          document.body.className = "bg-slate-100 text-slate-800 font-sans min-h-screen p-4";
+          fetchOwnerData();
+          pollTimer = setInterval(fetchOwnerData, 4000);
+        }
+
+        function lockScreen() {
+          localStorage.removeItem('pharmalink_owner_pin');
+          clearInterval(pollTimer);
+          document.getElementById('dashboardScreen').classList.add('hidden');
+          document.getElementById('pinScreen').classList.remove('hidden');
+          document.body.className = "bg-slate-900 text-slate-800 font-sans min-h-screen flex flex-col justify-center p-4";
+          clearPin();
+        }
+
+        async function fetchOwnerData() {
+          const pin = localStorage.getItem('pharmalink_owner_pin');
+          if (!pin) return lockScreen();
+
+          try {
+            const res = await fetch('/api/owner/garissa-branch/summary?pin=' + pin);
+            if (res.status === 401) return lockScreen();
+
             const data = await res.json();
             document.getElementById('totalSales').innerText = 'KES ' + Number(data.today.totalRevenue || 0).toLocaleString();
             document.getElementById('mpesaSales').innerText = 'KES ' + Number(data.today.mpesaRevenue || 0).toLocaleString();
@@ -422,12 +539,19 @@ app.get('/owner', (req, res) => {
             }
           } catch(e) {}
         }
-        fetchOwnerData();
-        setInterval(fetchOwnerData, 4000);
+
+        // Auto-unlock if PIN already saved in browser
+        window.onload = () => {
+          const savedPin = localStorage.getItem('pharmalink_owner_pin');
+          if (savedPin) {
+            currentPin = savedPin;
+            submitPin();
+          }
+        };
       </script>
     </body>
     </html>
   `);
 });
 
-app.listen(PORT, () => console.log(`Cloud Server with M-Pesa running on http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`Secure Cloud API running on http://localhost:${PORT}`));
